@@ -1,0 +1,14 @@
+{
+  "name": "karapiro-cartel-speed-shop",
+  "version": "1.0.0",
+  "description": "An intelligent, end-to-end web app that empowers drivers and mechanics with next-generation vehicle health, tuning, and maintenance tools using AI.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "author": "",
+  "license": "ISC"
+}

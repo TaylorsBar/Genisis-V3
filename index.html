@@ -1,0 +1,124 @@
+
+<script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.1.1/",
+    "react": "https://aistudiocdn.com/react@^19.1.1",
+    "recharts": "https://aistudiocdn.com/recharts@^3.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.19.0",
+    "react-router-dom": "https://aistudiocdn.com/react-router-dom@^7.9.1",
+    "react-markdown": "https://aistudiocdn.com/react-markdown@^10.1.0",
+    "zustand": "https://aistudiocdn.com/zustand@^4.5.0"
+  }
+}
+</script>
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Karapiro Cartel | Genesis OS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              'brand-cyan': '#00F0FF',
+              'brand-blue': '#0099FF',
+              'brand-purple': '#BC13FE',
+              'brand-red': '#FF003C',
+              'brand-yellow': '#FCEE0A',
+              'surface-dark': '#050505',
+              'surface-panel': '#0A0A0A',
+              'surface-border': '#1F1F1F',
+            },
+            fontFamily: {
+              'sans': ['Inter', 'system-ui', 'sans-serif'],
+              'mono': ['JetBrains Mono', 'Roboto Mono', 'monospace'],
+              'display': ['Orbitron', 'sans-serif'],
+            },
+            backgroundImage: {
+              'carbon': "url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAIklEQVQIW2NkQAKrVq36zwjjgzj//v37zwjjgzhhYWGMYAIAdZkKwz/CXYoAAAAASUVORK5CYII=')",
+              'mesh': "radial-gradient(#1a1a1a 1px, transparent 1px)"
+            }
+          },
+        },
+      }
+    </script>
+    <style>
+      :root {
+        --glass-bg: rgba(10, 10, 12, 0.75);
+        --glass-border: rgba(255, 255, 255, 0.08);
+        --neon-cyan: #00F0FF;
+        --neon-red: #FF003C;
+        --neon-glow: 0 0 10px rgba(0, 240, 255, 0.5);
+      }
+
+      body {
+        background-color: #050505;
+        color: #e0e0e0;
+        font-family: 'Inter', sans-serif;
+        overflow: hidden; /* App manages scroll */
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* Custom Scrollbar for "Technical" feel */
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-track {
+        background: #0a0a0a; 
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: #333; 
+        border-radius: 3px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: var(--neon-cyan); 
+      }
+
+      /* Utilities */
+      .glass-panel {
+        background: var(--glass-bg);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--glass-border);
+      }
+
+      .neon-text {
+        text-shadow: 0 0 5px rgba(0, 240, 255, 0.6);
+      }
+      
+      .scanline {
+        background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2));
+        background-size: 100% 4px;
+        pointer-events: none;
+      }
+
+      /* Keyframes for Neural Orb */
+      @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+      @keyframes ping {
+        75%, 100% { transform: scale(2); opacity: 0; }
+      }
+      @keyframes pulse {
+        50% { opacity: .5; }
+      }
+      @keyframes bounce {
+        0%, 100% { transform: translateY(-25%); animation-timing-function: cubic-bezier(0.8,0,1,1); }
+        50% { transform: none; animation-timing-function: cubic-bezier(0,0,0.2,1); }
+      }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Orbitron:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root" class="h-screen w-screen flex flex-col"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
