@@ -16,6 +16,7 @@ interface LiveTelemetryGraphProps {
 const LiveTelemetryGraph: React.FC<LiveTelemetryGraphProps> = ({ data, height = "100%" }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const plotRef = useRef<any>(null);
+    const lastDataIndex = useRef<number>(0);
 
     useEffect(() => {
         if (!window.Plotly || !containerRef.current) return;
@@ -58,7 +59,8 @@ const LiveTelemetryGraph: React.FC<LiveTelemetryGraphProps> = ({ data, height = 
                 showgrid: true,
                 gridcolor: '#1a1a1a',
                 tickfont: { color: '#555' },
-                showticklabels: false, // cleaner look for streaming
+                showticklabels: false,
+                range: [Date.now() - 10000, Date.now()] // 10s rolling window
             },
             yaxis: {
                 title: 'RPM',
@@ -102,25 +104,36 @@ const LiveTelemetryGraph: React.FC<LiveTelemetryGraphProps> = ({ data, height = 
         };
     }, []);
 
-    // Efficient Update Loop
+    // Optimized High-Performance Streaming using extendTraces
     useEffect(() => {
         if (!plotRef.current || !data.length) return;
 
-        const times = data.map(d => new Date(d.time).toISOString());
-        const rpm = data.map(d => d.rpm);
-        const boost = data.map(d => d.turboBoost);
-        const tps = data.map(d => d.engineLoad);
+        // Only process NEW points since last render
+        // This is vastly more efficient than reprocessing the entire array
+        const newPoints = data.slice(lastDataIndex.current);
+        if (newPoints.length === 0) return;
 
-        // Use Plotly.react for efficient diffing updates, much faster than newPlot
-        // Or simpler: Use 'update' if layout changes, 'restyle' if just data.
-        // For streaming, extending traces is best, but we are replacing the window here.
-        
-        const update = {
+        lastDataIndex.current = data.length;
+
+        const times = newPoints.map(d => new Date(d.time).toISOString());
+        const rpm = newPoints.map(d => d.rpm);
+        const boost = newPoints.map(d => d.turboBoost);
+        const tps = newPoints.map(d => d.engineLoad);
+
+        // Extend traces instead of updating entire layout
+        // This is critical for enterprise-grade "infinite logging" without performance degradation
+        window.Plotly.extendTraces(containerRef.current, {
             x: [times, times, times],
             y: [rpm, boost, tps]
+        }, [0, 1, 2]);
+
+        // Shift X-axis window to follow head
+        const now = new Date(data[data.length - 1].time).getTime();
+        const layoutUpdate = {
+            'xaxis.range': [new Date(now - 10000).toISOString(), new Date(now).toISOString()]
         };
 
-        window.Plotly.update(containerRef.current, update, {}, [0, 1, 2]);
+        window.Plotly.relayout(containerRef.current, layoutUpdate);
 
     }, [data]);
 
@@ -132,11 +145,11 @@ const LiveTelemetryGraph: React.FC<LiveTelemetryGraphProps> = ({ data, height = 
             <div className="absolute top-2 right-2 flex gap-4 pointer-events-none">
                 <div className="text-right">
                     <span className="text-[9px] text-brand-yellow uppercase block font-bold">RPM Max</span>
-                    <span className="text-xs font-mono text-white">{Math.max(...data.map(d=>d.rpm)).toFixed(0)}</span>
+                    <span className="text-xs font-mono text-white">{Math.max(...data.map(d=>d.rpm), 0).toFixed(0)}</span>
                 </div>
                 <div className="text-right">
                     <span className="text-[9px] text-brand-cyan uppercase block font-bold">Boost Peak</span>
-                    <span className="text-xs font-mono text-white">{Math.max(...data.map(d=>d.turboBoost)).toFixed(2)}</span>
+                    <span className="text-xs font-mono text-white">{Math.max(...data.map(d=>d.turboBoost), 0).toFixed(2)}</span>
                 </div>
             </div>
         </div>

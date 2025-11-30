@@ -18,6 +18,14 @@ type BluetoothDevice = any;
 type BluetoothRemoteGATTServer = any;
 type BluetoothRemoteGATTCharacteristic = any;
 
+interface QueuedCommand {
+    cmd: string;
+    priority: 'high' | 'low';
+    resolve: (val: string) => void;
+    reject: (err: any) => void;
+    timestamp: number;
+}
+
 export class ObdService {
   private device: BluetoothDevice | null = null;
   private server: BluetoothRemoteGATTServer | null = null;
@@ -27,8 +35,16 @@ export class ObdService {
   private responseResolver: ((value: string) => void) | null = null;
   private currentResponse: string = "";
   private isBusy: boolean = false;
+  
+  // Performance Optimization: Command Queue
+  private commandQueue: QueuedCommand[] = [];
+  private isProcessingQueue: boolean = false;
 
   constructor(private onStatusChange: (status: ObdConnectionState) => void) {}
+
+  public get isConnected(): boolean {
+    return !!(this.device?.gatt?.connected && this.writeChar);
+  }
 
   public async connect(): Promise<void> {
     // @ts-ignore
@@ -98,6 +114,7 @@ export class ObdService {
     this.server = null;
     this.writeChar = null;
     this.notifyChar = null;
+    this.commandQueue = [];
     this.onStatusChange(ObdConnectionState.Disconnected);
   };
 
@@ -116,6 +133,7 @@ export class ObdService {
     
     this.currentResponse += chunk;
 
+    // The '>' character is the ELM327 prompt indicating it's ready for the next command
     if (this.currentResponse.includes('>')) {
       const fullResponse = this.currentResponse.replace('>', '').trim();
       this.currentResponse = "";
@@ -130,54 +148,109 @@ export class ObdService {
   private async initializeElm327() {
     this.onStatusChange(ObdConnectionState.Initializing);
     
-    await this.runCommand("AT Z"); 
-    await new Promise(r => setTimeout(r, 800)); 
-
+    // Hard reset
+    await this.runCommandDirect("AT Z", 1000); 
+    
+    // Optimization sequence
     const initCommands = [
-        "AT E0", "AT L0", "AT S0", "AT H0", "AT AT 1", "AT SP 0"
+        "AT E0",  // Echo Off
+        "AT L0",  // Linefeeds Off
+        "AT S0",  // Spaces Off (Saves bandwidth)
+        "AT H0",  // Headers Off (For standard PID queries)
+        "AT AT 1", // Adaptive Timing
+        "AT SP 0", // Auto Protocol Search
+        "AT DP"    // Display Protocol (to ensure connection)
     ];
 
     for (const cmd of initCommands) {
-        await this.runCommand(cmd);
-        await new Promise(r => setTimeout(r, 50));
+        await this.runCommandDirect(cmd, 100);
     }
     
-    await this.runCommand("0100");
-    console.log(`OBD Init Complete.`);
+    // Force a PID 0100 to ensure bus initiation
+    await this.runCommandDirect("0100", 200);
+    console.log(`OBD Optimized Init Complete.`);
   }
 
-  public async runCommand(cmd: string): Promise<string> {
+  /**
+   * Enterprise-Grade Queued Command Execution.
+   * Prevents command collisions and allows prioritization of critical sensors.
+   */
+  public runCommand(cmd: string, priority: 'high' | 'low' = 'low'): Promise<string> {
+      return new Promise((resolve, reject) => {
+          const newItem = { cmd, priority, resolve, reject, timestamp: Date.now() };
+          
+          // High priority commands (RPM/Speed) jump to front of line, behind currently executing
+          if (priority === 'high') {
+              // Find insertion index after other highs
+              let insertIdx = this.commandQueue.findIndex(i => i.priority === 'low');
+              if (insertIdx === -1) insertIdx = this.commandQueue.length;
+              this.commandQueue.splice(insertIdx, 0, newItem);
+          } else {
+              this.commandQueue.push(newItem);
+          }
+          
+          this.processQueue();
+      });
+  }
+
+  private async processQueue() {
+      if (this.isBusy || this.commandQueue.length === 0 || !this.isConnected) return;
+      
+      this.isBusy = true;
+      const item = this.commandQueue.shift();
+      
+      if (item) {
+          // Drop stale packets (>500ms old for high priority) to prevent lag buildup
+          if (item.priority === 'high' && Date.now() - item.timestamp > 500) {
+              item.resolve(""); // Resolve empty to skip
+              this.isBusy = false;
+              this.processQueue();
+              return;
+          }
+
+          try {
+              const res = await this.runCommandDirect(item.cmd);
+              item.resolve(res);
+          } catch (e) {
+              item.reject(e);
+          } finally {
+              this.isBusy = false;
+              // Immediate recursion for high throughput
+              this.processQueue(); 
+          }
+      }
+  }
+
+  /**
+   * Direct hardware write. Internal use only.
+   */
+  private async runCommandDirect(cmd: string, waitTime: number = 1500): Promise<string> {
     if (!this.writeChar || !this.device?.gatt?.connected) {
       return "";
     }
 
-    while (this.isBusy) {
-      await new Promise(r => setTimeout(r, 10));
-    }
-    this.isBusy = true;
-
     return new Promise<string>(async (resolve, reject) => {
       this.responseResolver = resolve;
       
+      // Safety timeout
       const timeout = setTimeout(() => {
-        this.isBusy = false;
         this.responseResolver = null;
-        resolve(""); 
-      }, 1500); 
+        resolve(""); // Return empty on timeout to keep queue moving
+      }, waitTime); 
 
       try {
         const encoder = new TextEncoder();
         await this.writeChar!.writeValue(encoder.encode(cmd + "\r"));
       } catch (e) {
         clearTimeout(timeout);
-        this.isBusy = false;
+        this.responseResolver = null;
         reject(e);
       }
 
+      // Intercept resolve to clear timeout
       const originalResolve = this.responseResolver;
       this.responseResolver = (val: string) => {
         clearTimeout(timeout);
-        this.isBusy = false;
         originalResolve!(val);
       }
     });
@@ -186,10 +259,8 @@ export class ObdService {
   // --- Diagnostics ---
 
   public async getDTCs(): Promise<string[]> {
-      // Mode 03: Confirmed Codes
-      const response03 = await this.runCommand("03");
-      // Mode 07: Pending Codes
-      const response07 = await this.runCommand("07");
+      const response03 = await this.runCommand("03", 'low'); // Confirmed
+      const response07 = await this.runCommand("07", 'low'); // Pending
       
       const codes = new Set<string>();
       
@@ -197,41 +268,33 @@ export class ObdService {
           const clean = resp.replace(/[\s\r\n]/g, '');
           if (clean.includes("NODATA")) return;
           
-          // Basic parser for CAN or ISO responses (43 xx xx xx...)
-          // Removing the Mode response prefix (e.g. 43)
           let hexData = clean;
           if (clean.startsWith('43') || clean.startsWith('47')) {
               hexData = clean.substring(2);
           }
           
-          // Each DTC is 2 bytes (4 hex chars)
           for (let i = 0; i < hexData.length; i += 4) {
               const dtcHex = hexData.substring(i, i+4);
               if (dtcHex === '0000' || dtcHex.length < 4) continue;
-              
               const code = this.parseDTC(dtcHex);
               if (code) codes.add(code);
           }
       });
-      
       return Array.from(codes);
   }
 
   public async clearDTCs(): Promise<boolean> {
-      const response = await this.runCommand("04");
-      return response.includes("OK") || response.length < 5; // ELM sometimes just returns prompt
+      const response = await this.runCommand("04", 'low');
+      return response.includes("OK") || response.length < 5;
   }
 
   private parseDTC(hex: string): string {
       const A = parseInt(hex.substring(0, 2), 16);
       const B = hex.substring(2, 4);
-      
-      const typeCode = (A & 0xC0) >> 6; // First 2 bits
+      const typeCode = (A & 0xC0) >> 6;
       const typeChar = ['P', 'C', 'B', 'U'][typeCode];
-      
       const digit2 = (A & 0x30) >> 4;
       const digit3 = A & 0x0F;
-      
       return `${typeChar}${digit2}${digit3}${B}`;
   }
 

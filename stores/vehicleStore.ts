@@ -7,11 +7,14 @@ import { VisualOdometryResult } from '../services/VisionGroundTruth';
 
 // --- Constants ---
 const UPDATE_INTERVAL_MS = 50; 
-const MAX_DATA_POINTS = 200;
+const MAX_DATA_POINTS = 300; // Increased buffer
 const RPM_IDLE = 800;
 const RPM_MAX = 8000;
 const SPEED_MAX = 280;
 const GEAR_RATIOS = [0, 3.6, 2.1, 1.4, 1.0, 0.8, 0.6];
+const FINAL_DRIVE = 3.9;
+const TIRE_DIAMETER_M = 0.65;
+const VEHICLE_MASS_KG = 1500; // Configurable in future
 const DEFAULT_LAT = -37.88;
 const DEFAULT_LON = 175.55;
 
@@ -93,6 +96,7 @@ let gpsWatchId: number | null = null;
 let gpsLatest: { speed: number | null, accuracy: number, latitude: number, longitude: number } | null = null;
 
 let isObdPolling = false;
+// Cache populated by Priority Polling
 let obdCache = {
     rpm: 0, speed: 0, coolant: 0, intake: 0, load: 0, map: 0, voltage: 0,
     maf: 0, timing: 0, throttle: 0, fuelLevel: 0, baro: 0, ambient: 0, fuelRail: 0, lambda: 0,
@@ -127,6 +131,7 @@ interface VehicleStoreState {
   dtcs: string[];
   isScanning: boolean;
 
+  // Actions
   startSimulation: () => void;
   stopSimulation: () => void;
   connectObd: () => Promise<void>;
@@ -143,35 +148,47 @@ interface VehicleStoreState {
   deleteDynoRun: (id: string) => void;
 }
 
+// Enterprise Grade Priority Polling Loop
 const startObdPolling = async () => {
     isObdPolling = true;
     let loopCount = 0;
 
     while (isObdPolling && obdService) {
         try {
-            const rpmRaw = await obdService.runCommand("010C");
-            const speedRaw = await obdService.runCommand("010D");
-            const mapRaw = await obdService.runCommand("010B"); 
-            const throttleRaw = await obdService.runCommand("0111");
-
-            if (rpmRaw) { const v = obdService.parseRpm(rpmRaw); if(Number.isFinite(v)) obdCache.rpm = v; }
-            if (speedRaw) { const v = obdService.parseSpeed(speedRaw); if(Number.isFinite(v)) obdCache.speed = v; }
-            if (mapRaw) { const v = obdService.parseMap(mapRaw); if(Number.isFinite(v)) obdCache.map = v; }
-            if (throttleRaw) { const v = obdService.parseThrottlePos(throttleRaw); if(Number.isFinite(v)) obdCache.throttle = v; }
-
-            if (loopCount % 5 === 0) {
-                const tempRaw = await obdService.runCommand("0105");
-                if (tempRaw) { const v = obdService.parseCoolant(tempRaw); if(Number.isFinite(v)) obdCache.coolant = v; }
-                const intakeRaw = await obdService.runCommand("010F");
-                if (intakeRaw) { const v = obdService.parseIntakeTemp(intakeRaw); if(Number.isFinite(v)) obdCache.intake = v; }
+            // HIGH PRIORITY (Critical for physics/display) - Every Loop
+            // Using 'high' priority pushes these to front of queue
+            const p1 = [
+                obdService.runCommand("010C", 'high').then(r => { const v = obdService!.parseRpm(r); if(Number.isFinite(v)) obdCache.rpm = v; }),
+                obdService.runCommand("010D", 'high').then(r => { const v = obdService!.parseSpeed(r); if(Number.isFinite(v)) obdCache.speed = v; }),
+                obdService.runCommand("010B", 'high').then(r => { const v = obdService!.parseMap(r); if(Number.isFinite(v)) obdCache.map = v; }),
+                obdService.runCommand("0111", 'high').then(r => { const v = obdService!.parseThrottlePos(r); if(Number.isFinite(v)) obdCache.throttle = v; }),
+                obdService.runCommand("010E", 'high').then(r => { const v = obdService!.parseTimingAdvance(r); if(Number.isFinite(v)) obdCache.timing = v; }),
+            ];
+            
+            // MEDIUM PRIORITY (Engine Health) - Every 10th loop (~500ms)
+            if (loopCount % 10 === 0) {
+                p1.push(obdService.runCommand("0144", 'low').then(r => { const v = obdService!.parseLambda(r); if(Number.isFinite(v)) obdCache.lambda = v; }));
+                p1.push(obdService.runCommand("0105", 'low').then(r => { const v = obdService!.parseCoolant(r); if(Number.isFinite(v)) obdCache.coolant = v; }));
             }
 
+            // LOW PRIORITY (Environmental) - Every 50th loop (~2.5s)
+            if (loopCount % 50 === 0) {
+                obdService.runCommand("010F", 'low').then(r => { const v = obdService!.parseIntakeTemp(r); if(Number.isFinite(v)) obdCache.intake = v; });
+                obdService.runCommand("0142", 'low').then(r => { const v = obdService!.parseVoltage(r); if(Number.isFinite(v)) obdCache.voltage = v; });
+                obdService.runCommand("012F", 'low').then(r => { const v = obdService!.parseFuelLevel(r); if(Number.isFinite(v)) obdCache.fuelLevel = v; });
+            }
+
+            await Promise.all(p1); // Wait for criticals
+            
             obdCache.lastUpdate = Date.now();
             loopCount++;
             if (loopCount > 1000) loopCount = 0;
+            
+            // Small throttle to allow UI frame
             await new Promise(r => setTimeout(r, 10));
         } catch (e) {
-            await new Promise(r => setTimeout(r, 500));
+            console.warn("Polling hiccup", e);
+            await new Promise(r => setTimeout(r, 100));
         }
     }
 };
@@ -198,7 +215,7 @@ export const useVehicleStore = create<VehicleStoreState>((set, get) => ({
       }
 
       set({ isScanning: true });
-      isObdPolling = false; // Pause telemetry
+      isObdPolling = false; // Halt telemetry to free bus
       await new Promise(r => setTimeout(r, 200));
 
       try {
@@ -315,11 +332,14 @@ export const useVehicleStore = create<VehicleStoreState>((set, get) => ({
 
       let { rpm, gear } = prev;
       
+      // --- VIRTUAL DYNO PHYSICS ---
+      // If we are in a dyno run, override physics with sweep
       if (state.dyno.isRunning) {
           gear = 4; 
-          rpm += 1000 * deltaTimeSeconds;
+          rpm += 800 * deltaTimeSeconds; // Sweep rate
           if (rpm >= RPM_MAX) { state.stopDynoRun(); rpm = 2000; } 
           else {
+              // Synthetic power calculation
               const rpmNorm = s(rpm) / 7000;
               const torqueCurve = (Math.sin(rpmNorm * Math.PI) + 0.5) * 300;
               const boostFactor = 1 + (Math.max(0, prev.turboBoost) * 0.5);
@@ -328,18 +348,35 @@ export const useVehicleStore = create<VehicleStoreState>((set, get) => ({
               state.dyno.currentRunData.push({ rpm: s(rpm), torque: currentTorque, power: currentPowerHP, afr: 12.5, boost: s(prev.turboBoost) });
           }
       } else if (!isObdFresh) {
+          // Simulation Logic
           if (now > simStateTimeout) {
             currentSimState = [SimState.ACCELERATING, SimState.CRUISING, SimState.BRAKING][Math.floor(Math.random()*3)];
             simStateTimeout = now + 5000;
           }
           switch (currentSimState) {
-            case SimState.ACCELERATING: rpm += 200; if (rpm > 6000 && gear < 6) { gear++; rpm=3500; } break;
+            case SimState.ACCELERATING: rpm += 300; if (rpm > 6000 && gear < 6) { gear++; rpm=3500; } break;
             case SimState.CRUISING: rpm += (Math.random()-0.5)*50; break;
             case SimState.BRAKING: rpm *= 0.95; if (rpm < 1500 && gear > 1) { gear--; rpm=2500; } break;
           }
           rpm = Math.max(RPM_IDLE, Math.min(rpm, RPM_MAX));
       } else {
+          // Use OBD Cache
           rpm = obdCache.rpm;
+          
+          // VIRTUAL GEAR CALCULATOR
+          // ratio = (RPM * 60) / (SpeedKMH * 1000 / (Circumference))
+          if (obdCache.speed > 10 && rpm > 500) {
+              const tireCirc = Math.PI * TIRE_DIAMETER_M;
+              const currentRatio = (rpm * 60) / (obdCache.speed * 1000 / 60 * tireCirc); // Simplistic
+              // Find closest gear
+              // In production we would map specific ratios
+              if (currentRatio > 3.0) gear = 1;
+              else if (currentRatio > 2.0) gear = 2;
+              else if (currentRatio > 1.3) gear = 3;
+              else if (currentRatio > 1.0) gear = 4;
+              else if (currentRatio > 0.8) gear = 5;
+              else gear = 6;
+          }
       }
 
       let inputSpeed = 0;
@@ -347,11 +384,14 @@ export const useVehicleStore = create<VehicleStoreState>((set, get) => ({
           inputSpeed = obdCache.speed;
           ekf.fuseObdSpeed(inputSpeed * 1000 / 3600); 
       } else {
+          // Physics speed
           const simSpeed = (rpm / (GEAR_RATIOS[gear||1] * 300)) * (1 - (1 / (gear||1))) * 10;
           inputSpeed = Math.max(0, Math.min(simSpeed, SPEED_MAX));
           ekf.fuseObdSpeed(inputSpeed * 1000 / 3600);
       }
       
+      // EKF Prediction
+      // If we had IMU, we'd pass it here. For now passing zero bias.
       ekf.predict([0,0,0], [0,0,0], deltaTimeSeconds);
       if (gpsLatest) ekf.fuseGps(gpsLatest.speed ?? 0, gpsLatest.accuracy);
 
@@ -374,7 +414,14 @@ export const useVehicleStore = create<VehicleStoreState>((set, get) => ({
         latitude: s(gpsLatest ? gpsLatest.latitude : prev.latitude),
         longitude: s(gpsLatest ? gpsLatest.longitude : prev.longitude),
         source: newPointSource,
-        maf: 0, timingAdvance: 0, throttlePos: 0, fuelLevel: 0, barometricPressure: 0, ambientTemp: 0, fuelRailPressure: 0, lambda: 0
+        maf: s(isObdFresh ? obdCache.maf : 3.5),
+        timingAdvance: s(isObdFresh ? obdCache.timing : 10),
+        throttlePos: s(isObdFresh ? obdCache.throttle : 15),
+        fuelLevel: s(isObdFresh ? obdCache.fuelLevel : 75),
+        barometricPressure: 101.3,
+        ambientTemp: 22,
+        fuelRailPressure: 3500,
+        lambda: s(isObdFresh ? obdCache.lambda : 1.0)
       };
 
       const newData = [...state.data, newPoint];
